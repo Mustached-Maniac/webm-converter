@@ -63,10 +63,21 @@ export default {
     
     if (url.pathname === '/upload' && request.method === 'POST') {
       try {
-        console.log('Acquiring container for upload...');
-        const container = await getHealthyContainer(env);
-        console.log('Container acquired, uploading file...');
-        const uploadPromise = container.fetch(request);
+        const jobId = crypto.randomUUID();
+        console.log(`Generated job_id: ${jobId}`);
+        const container = getContainer(env.WEBM_CONVERTER, jobId);
+        console.log(`Using container with affinity for job: ${jobId}`);
+        const clonedRequest = new Request(request.url, {
+          method: request.method,
+          headers: {
+            ...Object.fromEntries(request.headers),
+            'X-Job-Id': jobId
+          },
+          body: request.body,
+          duplex: 'half'
+        } as any);
+        
+        const uploadPromise = container.fetch(clonedRequest);
         const timeoutPromise = new Promise<Response>((_, reject) =>
           setTimeout(() => reject(new Error('Upload timeout')), 25000)
         );
@@ -94,7 +105,7 @@ export default {
         });
       }
     }
-
+    
     if (url.pathname.startsWith('/status/') && request.method === 'GET') {
       try {
         const jobId = url.pathname.split('/status/')[1];
