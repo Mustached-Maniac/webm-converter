@@ -1,0 +1,40 @@
+# Rust
+target/
+Cargo.lock
+**/*.rs.bk
+
+# Node
+node_modules/
+.npm
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Wrangler
+.wrangler/
+.dev.vars
+.env
+.env.*
+!.env.example
+
+# Docker
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Test files
+test-*.mp4
+test-*.webm
+test-*.mov
+*.mp4
+*.webm
+*.mov

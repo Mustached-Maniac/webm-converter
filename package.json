@@ -1,0 +1,20 @@
+{
+  "name": "webm-converter",
+  "version": "1.0.0",
+  "description": "Video to WebM converter using Cloudflare Containers",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "list-containers": "wrangler containers list",
+    "list-images": "wrangler containers images list",
+    "cf-typegen": "wrangler types"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.2",
+    "wrangler": "^4.45.4"
+  },
+  "dependencies": {
+    "@cloudflare/containers": "^0.0.30"
+  }
+}

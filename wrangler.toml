@@ -1,0 +1,23 @@
+name = "webm-converter"
+compatibility_date = "2024-09-02"
+main = "worker/index.ts"
+
+[observability]
+enabled = true
+
+[[containers]]
+class_name = "WebmConverter"
+image = "./Dockerfile"
+max_instances = 3
+instance_type = "standard-2"
+
+[[durable_objects.bindings]]
+name = "WEBM_CONVERTER"
+class_name = "WebmConverter"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["WebmConverter"]
+
+[build]
+externals = ["@cloudflare/containers"]
