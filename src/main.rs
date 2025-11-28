@@ -164,74 +164,75 @@ async fn save_upload(
 async fn detect_green_color(input_path: &str) -> Result<String, std::io::Error> {
     let probe_output = Command::new("ffprobe")
         .args(&[
-            "-v",
-            "error",
-            "-select_streams",
-            "v:0",
-            "-show_entries",
-            "stream=width,height",
-            "-of",
-            "csv=p=0",
+            "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=width,height,duration",
+            "-of", "csv=p=0",
             input_path,
         ])
         .output()
         .await?;
-    let dimensions = String::from_utf8_lossy(&probe_output.stdout);
-    let parts: Vec<&str> = dimensions.trim().split(',').collect();
-    if parts.len() < 2 {
+    
+    let info = String::from_utf8_lossy(&probe_output.stdout);
+    let parts: Vec<&str> = info.trim().split(',').collect();
+    if parts.len() < 3 {
         return Ok("0x00FF00".to_string());
     }
+    
     let width: i32 = parts[0].parse().unwrap_or(1920);
     let height: i32 = parts[1].parse().unwrap_or(1080);
+    let duration: f64 = parts[2].parse().unwrap_or(1.0);
     let patch_size: i32 = 20;
     let margin: i32 = 10;
-    let corners = [
+    let spatial_points = vec![
         (margin, margin),
         (width - patch_size - margin, margin),
         (margin, height - patch_size - margin),
         (width - patch_size - margin, height - patch_size - margin),
     ];
+
+    let temporal_points = vec![0.5, duration * 0.5, duration * 0.75];
+    let output = Command::new("ffmpeg")
+        .args(&[
+            "-i", input_path,
+            "-vf", &format!(
+                "select='eq(t\\,{})+eq(t\\,{})+eq(t\\,{})',\
+                 crop={}:{}:{}:{},crop={}:{}:{}:{},crop={}:{}:{}:{},crop={}:{}:{}:{}",
+                temporal_points[0], temporal_points[1], temporal_points[2],
+                patch_size, patch_size, spatial_points[0].0, spatial_points[0].1,
+                patch_size, patch_size, spatial_points[1].0, spatial_points[1].1,
+                patch_size, patch_size, spatial_points[2].0, spatial_points[2].1,
+                patch_size, patch_size, spatial_points[3].0, spatial_points[3].1,
+            ),
+            "-vsync", "0",
+            "-f", "rawvideo",
+            "-pix_fmt", "rgb24",
+            "-",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .await?;
+    
     let mut r_total: u64 = 0;
     let mut g_total: u64 = 0;
     let mut b_total: u64 = 0;
     let mut pixel_count: u64 = 0;
-    for &(x, y) in &corners {
-        let vf = format!("crop={}:{}:{}:{}", patch_size, patch_size, x, y);
-        let output = Command::new("ffmpeg")
-            .args(&[
-                "-i",
-                input_path,
-                "-vf",
-                &vf,
-                "-vframes",
-                "1",
-                "-f",
-                "rawvideo",
-                "-pix_fmt",
-                "rgb24",
-                "-",
-            ])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .output()
-            .await?;
-        let expected_bytes = (patch_size * patch_size * 3) as usize;
-        if output.stdout.len() >= expected_bytes {
-            let data = &output.stdout[..expected_bytes];
-            for chunk in data.chunks_exact(3) {
-                r_total += chunk[0] as u64;
-                g_total += chunk[1] as u64;
-                b_total += chunk[2] as u64;
-            }
-            pixel_count += (expected_bytes / 3) as u64;
-        }
+    
+    for chunk in output.stdout.chunks_exact(3) {
+        r_total += chunk[0] as u64;
+        g_total += chunk[1] as u64;
+        b_total += chunk[2] as u64;
+        pixel_count += 1;
     }
+    
     if pixel_count > 0 {
         let r = (r_total / pixel_count) as u8;
         let g = (g_total / pixel_count) as u8;
         let b = (b_total / pixel_count) as u8;
         return Ok(format!("0x{:02X}{:02X}{:02X}", r, g, b));
     }
+    
     Ok("0x00FF00".to_string())
 }
 
@@ -244,46 +245,57 @@ async fn convert_to_webm(
     let crf_string = options.crf.to_string();
     let mut child = Command::new("ffmpeg")
         .args(&[
-            "-i",
-            input_path,
-            "-c:v",
-            "libvpx-vp9",
-            "-crf",
-            &crf_string,
-            "-b:v",
-            "0",
-            "-c:a",
-            "libopus",
-            "-b:a",
-            &options.audio_bitrate,
-            "-f",
-            "webm",
+            "-i", input_path,
+            "-c:v", "libvpx-vp9",
+            "-pix_fmt", "yuv420p",
+            "-crf", &crf_string,
+            "-b:v", "1M",
+            "-cpu-used", "5",
+            "-deadline", "realtime",
+            "-row-mt", "1",
+            "-tile-columns", "2",
+            "-threads", "4",
+            "-lag-in-frames", "0",
+            "-c:a", "libopus",
+            "-b:a", &options.audio_bitrate,
+            "-f", "webm",
             "-y",
             output_path,
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()?;
+    
     if let Some(job_id) = job_id {
         let duration = get_video_duration(input_path).await.unwrap_or(1.0);
         let output_path_clone = output_path.to_string();
         let job_id_clone = job_id.clone();
+        
         tokio::spawn(async move {
             let start = Instant::now();
+            let mut last_size = 0u64;
+            
             loop {
-                sleep(Duration::from_secs(3)).await;
+                sleep(Duration::from_secs(2)).await;
+                
                 if let Ok(metadata) = tokio::fs::metadata(&output_path_clone).await {
-                    let elapsed = start.elapsed().as_secs_f64();
-                    let estimated_progress = (elapsed / duration) * 70.0 + 30.0;
-                    let progress = estimated_progress.min(99.0) as u8;
-                    let _ = update_job_progress(&job_id_clone, progress).await;
+                    let current_size = metadata.len();
+                    
+                    if current_size > 0 && current_size != last_size {
+                        let elapsed = start.elapsed().as_secs_f64();
+                        let progress = ((elapsed / (duration * 0.8)) * 70.0 + 30.0).min(99.0) as u8;
+                        let _ = update_job_progress(&job_id_clone, progress).await;
+                        last_size = current_size;
+                    }
                 }
-                if start.elapsed().as_secs() > 300 {
+                
+                if start.elapsed().as_secs() > 120 {
                     break;
                 }
             }
         });
     }
+    
     let output = child.wait_with_output().await?;
     if !output.status.success() {
         return Err(std::io::Error::new(
@@ -292,6 +304,54 @@ async fn convert_to_webm(
         ));
     }
     Ok(())
+}
+
+async fn process_video(
+    job_id: &str,
+    input_path: &str,
+    options: ConversionOptions,
+) {
+    let _ = update_job_progress(job_id, 10).await;
+    
+    let detected_green = if options.detect_green {
+        let _ = update_job_progress(job_id, 20).await;
+        match detect_green_color(input_path).await {
+            Ok(color) => Some(color),
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+    
+    if let Ok(Some(mut status)) = load_job_status(job_id).await {
+        status.progress = 30;
+        status.detected_green = detected_green.clone();
+        let _ = save_job_status(job_id, &status).await;
+    }
+    
+    let output_path = format!("/tmp/results/{}.webm", job_id);
+    let job_id_for_ffmpeg = job_id.to_string();
+    
+    match convert_to_webm(input_path, &output_path, &options, Some(job_id_for_ffmpeg)).await {
+        Ok(_) => {
+            if let Ok(Some(mut status)) = load_job_status(job_id).await {
+                status.status = "complete".to_string();
+                status.progress = 100;
+                status.result_path = Some(output_path);
+                status.detected_green = detected_green;
+                let _ = save_job_status(job_id, &status).await;
+            }
+        }
+        Err(e) => {
+            if let Ok(Some(mut status)) = load_job_status(job_id).await {
+                status.status = "failed".to_string();
+                status.error = Some(e.to_string());
+                let _ = save_job_status(job_id, &status).await;
+            }
+        }
+    }
+    
+    let _ = tokio::fs::remove_file(input_path).await;
 }
 
 async fn get_video_duration(input_path: &str) -> Result<f64, std::io::Error> {
@@ -312,50 +372,6 @@ async fn get_video_duration(input_path: &str) -> Result<f64, std::io::Error> {
         .trim()
         .parse::<f64>()
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid duration"))
-}
-
-async fn process_video(
-    job_id: &str,
-    input_path: &str,
-    options: ConversionOptions,
-) {
-    let start_time = Instant::now();
-    let _ = update_job_progress(job_id, 10).await;
-    let detected_green = if options.detect_green {
-        let _ = update_job_progress(job_id, 20).await;
-        match detect_green_color(input_path).await {
-            Ok(color) => Some(color),
-            Err(_) => None,
-        }
-    } else {
-        None
-    };
-    if let Ok(Some(mut status)) = load_job_status(job_id).await {
-        status.progress = 30;
-        status.detected_green = detected_green.clone();
-        let _ = save_job_status(job_id, &status).await;
-    }
-    let output_path = format!("/tmp/results/{}.webm", job_id);
-    let job_id_for_ffmpeg = job_id.to_string();
-    match convert_to_webm(input_path, &output_path, &options, Some(job_id_for_ffmpeg)).await {
-        Ok(_) => {
-            if let Ok(Some(mut status)) = load_job_status(job_id).await {
-                status.status = "complete".to_string();
-                status.progress = 100;
-                status.result_path = Some(output_path);
-                status.detected_green = detected_green;
-                let _ = save_job_status(job_id, &status).await;
-            }
-        }
-        Err(e) => {
-            if let Ok(Some(mut status)) = load_job_status(job_id).await {
-                status.status = "failed".to_string();
-                status.error = Some(e.to_string());
-                let _ = save_job_status(job_id, &status).await;
-            }
-        }
-    }
-    let _ = tokio::fs::remove_file(input_path).await;
 }
 
 #[actix_web::post("/upload")]
